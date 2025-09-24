@@ -242,6 +242,42 @@ github_token = your_github_token_here
 - **Time-based**: `Q1-2025,monthly-scan,pre-deployment`
 - **Project Classification**: `critical-app,internal-tool,public-facing`
 
+### **📊 Enhanced Fallback Reporting**
+
+When using light-scan mode, the scanner provides detailed reporting about GitHub access methods:
+
+```
+GITHUB ACCESS SUMMARY:
+----------------------
+API failures: 3 repositories
+Fallback successes: 2 repositories  
+Complete failures: 1 repositories
+
+REPOSITORIES ACCESSED VIA FALLBACK (Direct Raw GitHub):
+ 1. react-sdk
+    URL: https://github.com/optimizely/react-sdk
+    Files found: 2
+    Access method: direct_raw_github
+    Status: ✅ Fallback successful
+
+REPOSITORIES WITH API FAILURES:
+ 1. react-sdk
+    URL: https://github.com/optimizely/react-sdk
+    Reason: github_api_failed
+    Status: ✅ Recovered via direct raw access
+
+REPOSITORIES COMPLETELY INACCESSIBLE:
+ 1. android-sdk
+    URL: https://github.com/optimizely/android-sdk
+    Reason: all_methods_failed
+    Status: ❌ All access methods failed
+```
+
+**Report Categories:**
+- **✅ Fallback Successful**: Repositories recovered via direct raw access
+- **⚠️ API Failed**: Repositories where GitHub API failed but fallback worked
+- **❌ Complete Failure**: Repositories inaccessible by all methods (usually no NPM files)
+
 ### **Repository URL Detection**
 
 The tool automatically detects repository URLs from file paths:
@@ -273,6 +309,7 @@ Perfect for scanning hundreds of repositories quickly:
 - ⚡ **10x Faster**: Downloads only NPM files via GitHub API
 - 💾 **Zero Storage**: No repository cloning required
 - 🔄 **Batch Optimized**: Scan entire organizations efficiently
+- 🛡️ **Automatic Fallback**: Recovers from API failures using direct raw GitHub access
 
 ```bash
 # Set GitHub token for higher rate limits (recommended)
@@ -281,6 +318,31 @@ export GITHUB_TOKEN=your_github_token_here
 # Light scan repository list
 python3 enhanced_npm_compromise_detector_phoenix.py --repo-list repos.txt --light-scan --enable-phoenix
 ```
+
+#### **🔄 Intelligent Fallback System**
+
+When GitHub API access fails (invalid tokens, rate limits, etc.), the scanner automatically:
+
+1. **GitHub API Search** → Tries authenticated/unauthenticated API access
+2. **GitHub API Fallback** → Tries direct GitHub API file access  
+3. **Direct Raw Access** → Uses `raw.githubusercontent.com` for public repositories
+4. **Complete Documentation** → Reports exactly what happened in scan results
+
+**Example Fallback Flow:**
+```
+🔄 GitHub API failed completely, trying direct raw access...
+🔄 Fallback: Trying direct raw GitHub access for optimizely/react-sdk
+✅ Direct access found: package.json
+✅ Direct access found: yarn.lock
+✅ Fallback successful: Found 2 NPM file(s) via direct access
+```
+
+**Fallback Benefits:**
+- ✅ **Zero Empty Files**: No more JSON parsing errors from failed downloads
+- ✅ **Maximum Coverage**: Recovers repositories that would otherwise fail
+- ✅ **Detailed Reporting**: Shows which repositories used fallback methods
+- ✅ **Public Repository Support**: Works with any public GitHub repository
+- ✅ **Automatic Recovery**: No manual intervention required
 
 ### **🆕 New Enhanced Features (2025)**
 
@@ -733,6 +795,29 @@ else:
 "
 ```
 
+#### **🔧 GitHub API Troubleshooting**
+
+**Common Issues and Solutions:**
+
+| Issue | Symptoms | Solution |
+|-------|----------|----------|
+| **Invalid GitHub Token** | `Bad credentials (401)` | Generate new token at https://github.com/settings/tokens |
+| **Rate Limit Exceeded** | `API rate limit exceeded` | Wait or use valid token for higher limits |
+| **Empty Downloaded Files** | `JSON parsing errors` | ✅ **Auto-fixed by fallback system** |
+| **Private Repository** | `Not Found (404)` | Ensure token has `repo` permission |
+
+**Fallback System Handles:**
+- ✅ Invalid/expired GitHub tokens
+- ✅ API rate limit exceeded  
+- ✅ Authentication failures
+- ✅ Empty file downloads
+- ✅ Network timeouts
+
+**When Fallback Won't Work:**
+- ❌ Private repositories (requires valid token)
+- ❌ Repositories with no NPM files
+- ❌ Repositories that don't exist
+
 ### **Performance Benchmarks:**
 - Shell script: ~1-2 seconds for typical projects
 - Python basic scan: ~3-5 seconds for typical projects  
@@ -806,8 +891,11 @@ python3 enhanced_npm_compromise_detector_phoenix.py --repo-list enterprise_repos
 # Complete audit with all features including clean libraries
 python3 enhanced_npm_compromise_detector_phoenix.py --repo-list repos.txt --light-scan --organize-folders --delete-local-files --detail-log --enable-phoenix --import-all --output complete-audit.txt
 
-# Enterprise scan with custom tags
-python3 enhanced_npm_compromise_detector_phoenix.py --repo-list repos.txt --enable-phoenix --import-all --tag_vuln="Q4-audit,compliance" --tag_asset="production,critical" --output enterprise-scan.txt
+# Enterprise scan with custom tags and automatic fallback
+python3 enhanced_npm_compromise_detector_phoenix.py --repo-list repos.txt --light-scan --enable-phoenix --import-all --tag_vuln="Q4-audit,compliance" --tag_asset="production,critical" --output enterprise-scan.txt
+
+# Automatic fallback handles GitHub API failures (no configuration needed)
+python3 enhanced_npm_compromise_detector_phoenix.py --repo-list public_repos.txt --light-scan --import-all
 ```
 
 ### **📊 Exit Code Reference**
@@ -889,6 +977,7 @@ jobs:
 ### **📖 Additional Resources**
 - 📘 **[QUICK_START.md](QUICK_START.md)** - Comprehensive usage guide with GitHub Actions
 - 📄 **[COMMAND_REFERENCE.md](COMMAND_REFERENCE.md)** - Quick command reference card
+- ⚡ **[QUICK_CONFIG_GUIDE.md](QUICK_CONFIG_GUIDE.md)** - **NEW!** Enhanced fallback system & configuration
 - 🔗 **[PHOENIX_INTEGRATION_GUIDE.md](PHOENIX_INTEGRATION_GUIDE.md)** - Complete Phoenix integration guide
 - 🔧 **[PHOENIX_CREDENTIALS_SETUP.md](PHOENIX_CREDENTIALS_SETUP.md)** - Step-by-step credentials configuration
 - 💻 **[LOCAL_LAPTOP_USAGE_GUIDE.md](LOCAL_LAPTOP_USAGE_GUIDE.md)** - Local laptop usage with embedded credentials

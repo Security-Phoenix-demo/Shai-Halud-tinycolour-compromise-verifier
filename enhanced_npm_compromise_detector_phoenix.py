@@ -56,6 +56,9 @@ class EnhancedNPMCompromiseDetectorPhoenix:
         self.all_scanned_libraries = []  # Track all libraries found during scan
         self.clean_libraries = []     # Track clean libraries
         self.compromised_libraries = []  # Track compromised libraries
+        self.api_failed_repositories = []  # Track repositories where API failed
+        self.fallback_success_repositories = []  # Track repositories successfully accessed via fallback
+        self.completely_failed_repositories = []  # Track repositories that failed both API and fallback
         
         self.dependency_stats = {
             'direct_dependencies': 0,
@@ -229,6 +232,9 @@ assessment_name = NPM Compromise Detection - Shai Halud
 import_type = new
 
 # GitHub token for enhanced API rate limits (optional but recommended)
+# IMPORTANT: If token is invalid/expired, automatic fallback will use direct raw access
+# For public repositories: token is optional, fallback handles API failures automatically
+# For private repositories: valid token is required
 github_token = your_github_token_here
 
 # Additional tags for findings and assets (comma-separated)
@@ -236,6 +242,12 @@ github_token = your_github_token_here
 additional_vuln_tags = custom-scan,security-audit
 # These tags will be added to asset findings  
 additional_asset_tags = npm-project,dependency-scan
+
+# Enhanced Fallback System (Automatic - No Configuration Needed):
+# 1. GitHub API Search (with/without authentication)
+# 2. GitHub API Fallback (direct file access)
+# 3. Direct Raw Access (raw.githubusercontent.com for public repos)
+# 4. Complete failure documentation in reports
 
 # Optional settings
 # For demo environment, use: https://api.demo.appsecphx.io
@@ -313,19 +325,15 @@ additional_asset_tags = npm-project,dependency-scan
     def create_phoenix_asset(self, file_path: str, repo_url: str) -> Dict:
         """Create a Phoenix asset for a package file"""
         
-        # Create full GitHub path for the asset if we have a repo URL
-        if repo_url and "github.com" in repo_url:
-            # Clean up repo URL and fix the repository name format
-            clean_repo_url = repo_url.replace('.git', '')
-            
-            # Fix the repository URL to match the actual GitHub structure
-            if 'Shai-Hulud-npm-tinycolour-compromise-verifier' in clean_repo_url:
-                clean_repo_url = clean_repo_url.replace('Shai-Hulud-npm-tinycolour-compromise-verifier', 'Shai-Hulud-Hulud-Shai-npm-tinycolour-compromise-verifier')
-            
-            # Extract relative path for GitHub URL construction
-            relative_path = file_path
+        # Determine the buildFile path
+        # If file_path is a simple repository path (no local filesystem prefix), use it directly
+        if file_path and not os.path.isabs(file_path) and not file_path.startswith('/'):
+            # This is already a repository-relative path (from light scan mode)
+            build_file_path = file_path
+        elif repo_url and "github.com" in repo_url:
+            # For local files, try to extract meaningful relative path
             if os.path.isabs(file_path):
-                # Try to extract relative path
+                # Try to extract relative path from local file system path
                 path_parts = file_path.split(os.sep)
                 relative_path = os.path.basename(file_path)
                 
@@ -335,16 +343,17 @@ additional_asset_tags = npm-project,dependency-scan
                         if i < len(path_parts):
                             relative_path = '/'.join(path_parts[i:])
                             break
-            
-            # Construct full GitHub URL with /tree/main/ structure for Phoenix
-            full_github_path = f"{clean_repo_url}/tree/main/{relative_path}"
+                build_file_path = relative_path
+            else:
+                build_file_path = file_path
         else:
-            full_github_path = file_path
+            # Fallback to the file path as-is
+            build_file_path = file_path
             
         asset = {
             "attributes": {
                 "repository": repo_url or "unknown",
-                "buildFile": full_github_path,  # Use full GitHub path
+                "buildFile": build_file_path,  # Use clean repository path
                 "origin": "github" if "github.com" in (repo_url or "") else "unknown"
             },
             "tags": [
@@ -380,8 +389,11 @@ additional_asset_tags = npm-project,dependency-scan
             repo_info = f"Repo: {repo_url}, "
         
         # Extract just the filename/relative path for file info
-        if os.path.isabs(file_path):
-            # Try to get relative path from repository root
+        if file_path and not os.path.isabs(file_path) and not file_path.startswith('/'):
+            # This is already a clean repository-relative path (from light scan mode)
+            file_info = file_path
+        elif os.path.isabs(file_path):
+            # Try to get relative path from repository root for local files
             path_parts = file_path.split(os.sep)
             file_info = os.path.basename(file_path)  # Default to just filename
             
@@ -873,7 +885,7 @@ additional_asset_tags = npm-project,dependency-scan
             
         return False, '', []
 
-    def process_package_file(self, file_path: str, repo_url: str = None) -> Dict:
+    def process_package_file(self, file_path: str, repo_url: str = None, original_repo_path: str = None) -> Dict:
         """Process a single package file and create Phoenix asset with findings"""
         # Track this file as scanned
         self.scanned_files.append(file_path)
@@ -882,8 +894,9 @@ additional_asset_tags = npm-project,dependency-scan
         if not repo_url:
             repo_url = self.get_repo_url_from_path(file_path)
             
-        # Create Phoenix asset
-        asset = self.create_phoenix_asset(file_path, repo_url)
+        # Create Phoenix asset - use original repo path if available (for light scan mode)
+        asset_file_path = original_repo_path if original_repo_path else file_path
+        asset = self.create_phoenix_asset(asset_file_path, repo_url)
         
         print(f"📦 Processing: {file_path}")
         if repo_url:
@@ -910,10 +923,10 @@ additional_asset_tags = npm-project,dependency-scan
             if severity == 'INFO':
                 is_safe = True
                 
-            # Create Phoenix finding
+            # Create Phoenix finding - use asset file path for consistent location
             phoenix_finding = self.create_phoenix_finding(
                 package_name, version, severity or 'INFO', 
-                compromised_versions, is_safe, file_path, repo_url, dep_type
+                compromised_versions, is_safe, asset_file_path, repo_url, dep_type
             )
             
             asset['findings'].append(phoenix_finding)
@@ -921,13 +934,13 @@ additional_asset_tags = npm-project,dependency-scan
             # Add to findings list for reporting (with repo and file info)
             if is_compromised or is_safe:
                 # Create unique identifier to prevent duplicates
-                finding_id = f"{package_name}@{version}:{file_path}:{dep_type}"
+                finding_id = f"{package_name}@{version}:{asset_file_path}:{dep_type}"
                 
                 # Check if we already have this finding
                 existing_finding = any(
                     f.get('details', {}).get('package') == package_name and
                     f.get('details', {}).get('version') == version and
-                    f.get('file') == file_path and
+                    f.get('file') == asset_file_path and
                     f.get('details', {}).get('dependency_type') == dep_type
                     for f in self.findings
                 )
@@ -936,7 +949,7 @@ additional_asset_tags = npm-project,dependency-scan
                     report_finding = {
                         'severity': severity or 'INFO',
                         'message': f"Safe version detected: {package_name}@{version}" if is_safe else f"Compromised package detected: {package_name}@{version}",
-                        'file': file_path,
+                        'file': asset_file_path,  # Use repository path for consistent reporting
                         'repo_url': repo_url,
                         'details': {
                             'package': package_name,
@@ -955,7 +968,7 @@ additional_asset_tags = npm-project,dependency-scan
                 if lib.get('file') == file_path:  # Only process libraries from this specific file
                     phoenix_finding = self.create_phoenix_finding(
                         lib['name'], lib['clean_version'], 'CLEAN', 
-                        [], False, file_path, repo_url, lib['type']
+                        [], False, asset_file_path, repo_url, lib['type']
                     )
                     asset['findings'].append(phoenix_finding)
                     
@@ -963,7 +976,7 @@ additional_asset_tags = npm-project,dependency-scan
                     report_finding = {
                         'severity': 'CLEAN',
                         'message': f"Library {lib['name']} version {lib['clean_version']} is not affected by Shai Halud",
-                        'file': file_path,
+                        'file': asset_file_path,  # Use repository path for consistent reporting
                         'repo_url': repo_url,
                         'details': {
                             'package': lib['name'],
@@ -1253,13 +1266,40 @@ additional_asset_tags = npm-project,dependency-scan
             # Try GitHub API search first
             npm_files = self._search_github_api(owner, repo)
             
-            # If API search failed, try fallback method for public repos
+            # If API search failed, try GitHub API fallback method for public repos
             if not npm_files:
-                print(f"🔄 Trying fallback method for public repository...")
+                print(f"🔄 Trying GitHub API fallback method for public repository...")
                 npm_files = self._fallback_github_search(owner, repo)
+                
+                # If GitHub API completely failed, try direct raw access
+                if not npm_files:
+                    print(f"🔄 GitHub API failed completely, trying direct raw access...")
+                    # Track API failure
+                    self.api_failed_repositories.append({
+                        'owner': owner,
+                        'repo': repo,
+                        'url': f"https://github.com/{owner}/{repo}",
+                        'reason': 'github_api_failed'
+                    })
+                    npm_files = self._direct_raw_github_access(owner, repo)
+                    
+                    # If direct access also failed, track complete failure
+                    if not npm_files:
+                        self.completely_failed_repositories.append({
+                            'owner': owner,
+                            'repo': repo,
+                            'url': f"https://github.com/{owner}/{repo}",
+                            'reason': 'all_methods_failed'
+                        })
                     
         except Exception as e:
             print(f"❌ Error searching for NPM files in {owner}/{repo}: {str(e)}")
+            self.completely_failed_repositories.append({
+                'owner': owner,
+                'repo': repo,
+                'url': f"https://github.com/{owner}/{repo}",
+                'reason': f'exception: {str(e)}'
+            })
             
         return npm_files
         
@@ -1394,6 +1434,56 @@ additional_asset_tags = npm-project,dependency-scan
                 
         return npm_files
         
+    def _direct_raw_github_access(self, owner: str, repo: str) -> List[Dict]:
+        """Direct fallback method: Access raw.githubusercontent.com for common NPM files"""
+        npm_files = []
+        common_files = [
+            'package.json',
+            'package-lock.json', 
+            'yarn.lock'
+        ]
+        
+        base_url = f"https://raw.githubusercontent.com/{owner}/{repo}/master"
+        
+        print(f"🔄 Fallback: Trying direct raw GitHub access for {owner}/{repo}")
+        
+        for filename in common_files:
+            try:
+                file_url = f"{base_url}/{filename}"
+                response = requests.get(file_url, timeout=10)
+                
+                if response.status_code == 200:
+                    # Verify it's actually JSON/text content (not HTML error page)
+                    content = response.text.strip()
+                    if content and (filename.endswith('.json') and content.startswith('{') or filename.endswith('.lock')):
+                        npm_files.append({
+                            'name': filename,
+                            'path': filename,
+                            'download_url': file_url,
+                            'url': file_url,
+                            'type': self._get_file_type(filename),
+                            'content': content  # Store content directly for direct access
+                        })
+                        print(f"✅ Direct access found: {filename}")
+                    
+            except Exception as e:
+                continue  # Ignore errors for individual files
+                
+        if npm_files:
+            # Track successful fallback
+            self.fallback_success_repositories.append({
+                'owner': owner,
+                'repo': repo,
+                'url': f"https://github.com/{owner}/{repo}",
+                'files_found': len(npm_files),
+                'access_method': 'direct_raw_github'
+            })
+            print(f"✅ Fallback successful: Found {len(npm_files)} NPM file(s) via direct access")
+        else:
+            print(f"❌ Fallback failed: No NPM files accessible via direct access")
+            
+        return npm_files
+        
     def _get_file_type(self, filename: str) -> str:
         """Determine file type based on filename"""
         if filename == 'package.json':
@@ -1407,6 +1497,26 @@ additional_asset_tags = npm-project,dependency-scan
             
     def download_npm_file(self, file_info: Dict, repo_url: str, temp_dir: str) -> Optional[str]:
         """Download a single NPM file from GitHub"""
+        
+        # If we have direct content (from raw GitHub access), use it directly
+        if 'content' in file_info:
+            try:
+                # Create file path
+                file_path = os.path.join(temp_dir, file_info['path'])
+                os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                
+                # Write content to file
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write(file_info['content'])
+                    
+                print(f"✅ Direct content saved: {file_info['path']}")
+                return file_path
+                
+            except Exception as e:
+                print(f"❌ Error saving direct content for {file_info['path']}: {str(e)}")
+                return None
+        
+        # Original download logic for API-based files
         max_retries = 3
         timeout = 15  # Reduced timeout
         
@@ -1421,11 +1531,25 @@ additional_asset_tags = npm-project,dependency-scan
                     response = requests.get(file_info['url'], headers=headers, timeout=timeout)
                 
                 if response.status_code == 200:
-                    content_data = response.json()
-                    if content_data.get('encoding') == 'base64':
-                        content = base64.b64decode(content_data['content']).decode('utf-8')
-                    else:
-                        content = content_data.get('content', '')
+                    # Check if response is JSON (API response) or direct text
+                    try:
+                        content_data = response.json()
+                        if content_data.get('encoding') == 'base64':
+                            content = base64.b64decode(content_data['content']).decode('utf-8')
+                        else:
+                            content = content_data.get('content', '')
+                    except:
+                        # Direct text response
+                        content = response.text
+                        
+                    # Validate content is not empty
+                    if not content or content.strip() == '':
+                        if attempt < max_retries - 1:
+                            print(f"⚠️  Empty content on attempt {attempt + 1} for {file_info['path']}, retrying...")
+                            continue
+                        else:
+                            print(f"❌ Empty content for {file_info['path']} after {max_retries} attempts")
+                            return None
                         
                     # Create file path
                     file_path = os.path.join(temp_dir, file_info['path'])
@@ -1434,17 +1558,6 @@ additional_asset_tags = npm-project,dependency-scan
                     # Write content to file
                     with open(file_path, 'w', encoding='utf-8') as f:
                         f.write(content)
-                        
-                    return file_path
-                    
-                if response.status_code == 200:
-                    # Create file path
-                    file_path = os.path.join(temp_dir, file_info['path'])
-                    os.makedirs(os.path.dirname(file_path), exist_ok=True)
-                    
-                    # Write content to file
-                    with open(file_path, 'w', encoding='utf-8') as f:
-                        f.write(response.text)
                         
                     return file_path
                 else:
@@ -1509,8 +1622,9 @@ additional_asset_tags = npm-project,dependency-scan
                 
                 file_path = self.download_npm_file(file_info, repo_url, temp_dir)
                 if file_path:
-                    # Process the file
-                    asset = self.process_package_file(file_path, repo_url)
+                    # Process the file - pass original repository path for Phoenix asset
+                    original_repo_path = file_info['path']  # This is the path within the repository
+                    asset = self.process_package_file(file_path, repo_url, original_repo_path)
                     if asset:
                         assets.append(asset)
                         
@@ -1755,6 +1869,18 @@ additional_asset_tags = npm-project,dependency-scan
         if self.enable_phoenix_import:
             report_lines.append(f"Phoenix assets created: {len(self.phoenix_assets)}")
             
+        # Fallback access statistics
+        if self.light_scan_mode and (self.api_failed_repositories or self.fallback_success_repositories or self.completely_failed_repositories):
+            report_lines.append("")
+            report_lines.append("GITHUB ACCESS SUMMARY:")
+            report_lines.append("-" * 22)
+            if self.api_failed_repositories:
+                report_lines.append(f"API failures: {len(self.api_failed_repositories)} repositories")
+            if self.fallback_success_repositories:
+                report_lines.append(f"Fallback successes: {len(self.fallback_success_repositories)} repositories")
+            if self.completely_failed_repositories:
+                report_lines.append(f"Complete failures: {len(self.completely_failed_repositories)} repositories")
+            
         # Detailed scan information
         if self.scanned_files:
             report_lines.append("")
@@ -1793,6 +1919,42 @@ additional_asset_tags = npm-project,dependency-scan
                 report_lines.append(f"    URL: {repo['url']}")
                 report_lines.append(f"    Local path: {repo['local_path']}")
                 report_lines.append(f"    Source: {repo['source']}")
+                report_lines.append("")
+        
+        # Show repositories accessed via fallback
+        if self.fallback_success_repositories:
+            report_lines.append("REPOSITORIES ACCESSED VIA FALLBACK (Direct Raw GitHub):")
+            for i, repo in enumerate(self.fallback_success_repositories, 1):
+                report_lines.append(f"{i:2d}. {repo['repo']}")
+                report_lines.append(f"    URL: {repo['url']}")
+                report_lines.append(f"    Files found: {repo['files_found']}")
+                report_lines.append(f"    Access method: {repo['access_method']}")
+                report_lines.append(f"    Status: ✅ Fallback successful")
+                report_lines.append("")
+        
+        # Show repositories where API failed
+        if self.api_failed_repositories:
+            report_lines.append("REPOSITORIES WITH API FAILURES:")
+            for i, repo in enumerate(self.api_failed_repositories, 1):
+                report_lines.append(f"{i:2d}. {repo['repo']}")
+                report_lines.append(f"    URL: {repo['url']}")
+                report_lines.append(f"    Reason: {repo['reason']}")
+                # Check if fallback was successful
+                fallback_success = any(fb['repo'] == repo['repo'] for fb in self.fallback_success_repositories)
+                if fallback_success:
+                    report_lines.append(f"    Status: ✅ Recovered via direct raw access")
+                else:
+                    report_lines.append(f"    Status: ❌ Failed both API and fallback")
+                report_lines.append("")
+        
+        # Show completely failed repositories
+        if self.completely_failed_repositories:
+            report_lines.append("REPOSITORIES COMPLETELY INACCESSIBLE:")
+            for i, repo in enumerate(self.completely_failed_repositories, 1):
+                report_lines.append(f"{i:2d}. {repo['repo']}")
+                report_lines.append(f"    URL: {repo['url']}")
+                report_lines.append(f"    Reason: {repo['reason']}")
+                report_lines.append(f"    Status: ❌ All access methods failed")
                 report_lines.append("")
         
         # Library analysis summary
